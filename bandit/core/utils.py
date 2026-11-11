@@ -396,3 +396,114 @@ def get_nosec(nosec_lines, context):
         if nosec is not None:
             return nosec
     return None
+
+
+def build_nosec_ast_map(tree, nosec_lines):
+    """Bind ``# nosec`` comments to the AST node(s) they actually annotate.
+
+    The line based mapping in ``nosec_lines`` cannot distinguish a comment
+    attached to an inner argument of a multi-line call from one attached to
+    the enclosing call: every node whose line range contains the comment
+    line would treat the comment as its own.  This walks the AST instead and
+    binds each comment to the innermost node whose own line range contains
+    the comment line.  As a result a comment placed on an inner call or one
+    of its arguments is attached to that inner call only, never to the
+    enclosing call.  Comments on the first or last line of a node bind to
+    that node directly, which preserves the historical same-line behaviour.
+
+    :param tree: Parsed AST of the file (``ast.Module``).
+    :param nosec_lines: Mapping of line number to the set of test ids carried
+        by the ``# nosec`` comment on that line.  An empty set represents a
+        blanket ``# nosec`` without specific test ids.
+
+    Parent links (``_bandit_parent``) are assigned to every node while
+    walking the tree so the same references can be looked up later when the
+    node visitor processes the tree.
+
+    :return: Mapping of node instances to the merged set of suppressed test
+        ids.  Multiple comments bound to the same node have their id sets
+        merged.
+    """
+    nosec_nodes = {}
+    if not nosec_lines:
+        return nosec_nodes
+
+    # Leaf expression nodes never own bandit checks themselves; a comment
+    # next to a literal, name or attribute is intended for the enclosing
+    # expression (typically a call or an assignment) rather than for the
+    # leaf node.
+    leaf_nodes = (
+        ast.Constant,
+        ast.Name,
+        ast.Attribute,
+        ast.Starred,
+        ast.keyword,
+        ast.FormattedValue,
+    )
+
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            child._bandit_parent = node
+
+    # Walk the tree once, keeping the deepest non-leaf node that contains
+    # each comment line.  ast.walk yields parents before children, so a
+    # later match for the same line is always a descendant of the earlier
+    # one.
+    targets = {}
+    for node in ast.walk(tree):
+        if not hasattr(node, "lineno") or isinstance(node, leaf_nodes):
+            continue
+        for comment_line, nosec in nosec_lines.items():
+            if nosec is None:
+                # The line holds a comment but no nosec marker.
+                continue
+            if node.lineno <= comment_line <= node.end_lineno:
+                targets[comment_line] = node
+
+    for comment_line, target in targets.items():
+        bound = nosec_nodes.setdefault(target, set())
+        bound.update(nosec_lines[comment_line])
+
+    return nosec_nodes
+
+
+def get_nosec_for_node(nosec_nodes, nosec_lines, context):
+    """Return the tests suppressed for the node held in ``context``.
+
+    Only comments actually attached to the context node (or to one of its
+    parent nodes, to cover checks run against a child node such as a string
+    constant) apply.  An exact line lookup is kept as a fallback so legacy
+    placements that cannot be represented by a node boundary (multi-line
+    strings, implicit string concatenation) keep working.  Unlike the old
+    range based lookup the fallback never matches a line inside a node that
+    merely encloses the checked node, so an inner call comment cannot
+    suppress findings on the outer call.
+
+    :param nosec_nodes: Mapping of node instances to suppressed test id
+        sets.
+    :param nosec_lines: Mapping of comment line to suppressed test id sets.
+    :param context: The raw check context dictionary.
+    :return: A set of test ids (empty set means a blanket suppression) or
+        ``None`` when no comment applies.
+    """
+    nosec_tests = set()
+    found = False
+
+    candidate = context.get("node")
+    while candidate is not None:
+        bound = nosec_nodes.get(candidate)
+        if bound is not None:
+            found = True
+            nosec_tests.update(bound)
+        candidate = getattr(candidate, "_bandit_parent", None)
+
+    # Exact line fallback for comments on continuation lines that do not
+    # coincide with a node boundary relevant to the checked node.
+    lineno = context.get("lineno")
+    if lineno is not None:
+        nosec = nosec_lines.get(lineno)
+        if nosec is not None:
+            found = True
+            nosec_tests.update(nosec)
+
+    return nosec_tests if found else None

@@ -393,3 +393,95 @@ class ManagerTests(testtools.TestCase):
                 [issue_a, issue_b], [issue_a, issue_b, issue_c]
             ),
         )
+
+    def _run_bandit_on_source(self, source, ignore_nosec=False):
+        temp_directory = self.useFixture(fixtures.TempDir()).path
+        code_file = os.path.join(temp_directory, "code_file.py")
+        with open(code_file, "w") as fd:
+            fd.write(source)
+        mgr = manager.BanditManager(
+            config=config.BanditConfig(),
+            agg_type="file",
+            ignore_nosec=ignore_nosec,
+        )
+        mgr.discover_files([code_file], True)
+        mgr.run_tests()
+        return mgr
+
+    NESTED_NOSEC_SOURCE = """
+from subprocess import Popen
+
+Popen(
+    Popen(
+        "ls -l",
+        shell=False,  # nosec
+    ),
+    shell=True,
+)
+Popen("ls -l", shell=True)
+"""
+
+    def test_nosec_inner_call_does_not_suppress_outer_call(self):
+        mgr = self._run_bandit_on_source(self.NESTED_NOSEC_SOURCE)
+        findings = {
+            (result.lineno, result.test_id)
+            for result in mgr.get_issue_list()
+        }
+
+        # The outer shell=True call and the adjacent statement are still
+        # reported; the inner findings are suppressed by the nosec comment.
+        self.assertIn((9, "B602"), findings)
+        self.assertIn((11, "B602"), findings)
+        self.assertIn((11, "B607"), findings)
+        self.assertNotIn((5, "B607"), findings)
+        self.assertNotIn((7, "B603"), findings)
+
+    def test_nosec_metrics_count_real_suppressions_only(self):
+        mgr = self._run_bandit_on_source(self.NESTED_NOSEC_SOURCE)
+        totals = mgr.metrics.data["_totals"]
+
+        # Two inner findings were really suppressed by the single blanket
+        # nosec comment, while the outer findings were not.
+        self.assertEqual(2, totals["nosec"])
+        self.assertEqual(0, totals["skipped_tests"])
+
+    def test_ignore_nosec_reports_nested_findings(self):
+        mgr = self._run_bandit_on_source(
+            self.NESTED_NOSEC_SOURCE, ignore_nosec=True
+        )
+        findings = {
+            (result.lineno, result.test_id)
+            for result in mgr.get_issue_list()
+        }
+
+        self.assertIn((5, "B607"), findings)
+        self.assertIn((7, "B603"), findings)
+        self.assertIn((9, "B602"), findings)
+        self.assertEqual(0, mgr.metrics.data["_totals"]["nosec"])
+        self.assertEqual(
+            0, mgr.metrics.data["_totals"]["skipped_tests"]
+        )
+
+    def test_precise_nosec_only_suppresses_named_test(self):
+        source = """
+from subprocess import Popen
+
+Popen(
+    Popen(
+        "ls -l",
+        shell=False,  # nosec B603
+    ),
+    shell=True,
+)
+"""
+        mgr = self._run_bandit_on_source(source)
+        findings = {
+            (result.lineno, result.test_id)
+            for result in mgr.get_issue_list()
+        }
+
+        self.assertIn((9, "B602"), findings)
+        self.assertIn((5, "B607"), findings)
+        self.assertNotIn((7, "B603"), findings)
+        self.assertEqual(0, mgr.metrics.data["_totals"]["nosec"])
+        self.assertEqual(1, mgr.metrics.data["_totals"]["skipped_tests"])

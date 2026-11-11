@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
 import json
+import os
 import tempfile
 from unittest import mock
 
@@ -137,3 +138,55 @@ class SarifFormatterTests(testtools.TestCase):
                 self.tmp_fname,
                 physicalLocation["artifactLocation"]["uri"],
             )
+
+    def test_nosec_metrics_only_count_real_suppressions(self):
+        source = """
+from subprocess import Popen
+
+Popen(
+    Popen(
+        "ls -l",
+        shell=False,  # nosec
+    ),
+    shell=True,
+)
+Popen("ls -l", shell=True)
+"""
+        temp_dir = tempfile.mkdtemp()
+        code_file = os.path.join(temp_dir, "nested_nosec.py")
+        with open(code_file, "w") as fd:
+            fd.write(source)
+
+        mgr = manager.BanditManager(config.BanditConfig(), "file")
+        mgr.discover_files([code_file], True)
+        mgr.run_tests()
+
+        with open(self.tmp_fname, "w") as tmp_file:
+            sarif.report(
+                mgr,
+                tmp_file,
+                constants.LOW,
+                constants.LOW,
+            )
+
+        with open(self.tmp_fname) as f:
+            data = json.loads(f.read())
+
+        run = data["runs"][0]
+        totals = run["properties"]["metrics"]["_totals"]
+        # Only the two genuinely suppressed inner findings count; the
+        # outer and adjacent findings stay visible in the SARIF results.
+        self.assertEqual(2, totals["nosec"])
+        self.assertEqual(0, totals["skipped_tests"])
+        reported = {
+            (
+                result["locations"][0]["physicalLocation"]["region"][
+                    "startLine"
+                ],
+                result["ruleId"],
+            )
+            for result in run["results"]
+        }
+        self.assertIn((4, "B602"), reported)
+        self.assertIn((11, "B602"), reported)
+        self.assertNotIn((7, "B603"), reported)

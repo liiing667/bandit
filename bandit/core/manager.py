@@ -2,6 +2,7 @@
 # Copyright 2014 Hewlett-Packard Development Company, L.P.
 #
 # SPDX-License-Identifier: Apache-2.0
+import ast
 import collections
 import fnmatch
 import io
@@ -22,6 +23,7 @@ from bandit.core import meta_ast as b_meta_ast
 from bandit.core import metrics
 from bandit.core import node_visitor as b_node_visitor
 from bandit.core import test_set as b_test_set
+from bandit.core import utils as b_utils
 
 LOG = logging.getLogger(__name__)
 NOSEC_COMMENT = re.compile(r"#\s*nosec:?\s*(?P<tests>[^#]+)?#?")
@@ -319,7 +321,16 @@ class BanditManager:
 
             except tokenize.TokenError:
                 pass
-            score = self._execute_ast_visitor(fname, fdata, data, nosec_lines)
+            file_ast = ast.parse(data)
+            # Bind the comments to the actual AST nodes they annotate so
+            # that a comment on an inner argument of a nested multi-line
+            # call does not suppress findings on the enclosing call.
+            nosec_nodes = b_utils.build_nosec_ast_map(
+                file_ast, nosec_lines
+            )
+            score = self._execute_ast_visitor(
+                fname, fdata, data, nosec_lines, nosec_nodes, file_ast
+            )
             self.scores.append(score)
             self.metrics.count_issues([score])
         except KeyboardInterrupt:
@@ -343,7 +354,9 @@ class BanditManager:
             LOG.debug("  Exception string: %s", e)
             LOG.debug("  Exception traceback: %s", traceback.format_exc())
 
-    def _execute_ast_visitor(self, fname, fdata, data, nosec_lines):
+    def _execute_ast_visitor(
+        self, fname, fdata, data, nosec_lines, nosec_nodes, file_ast
+    ):
         """Execute AST parse on each file
 
         :param fname: The name of the file being parsed
@@ -359,6 +372,8 @@ class BanditManager:
             self.b_ts,
             self.debug,
             nosec_lines,
+            nosec_nodes,
+            file_ast,
             self.metrics,
         )
 

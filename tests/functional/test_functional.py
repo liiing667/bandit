@@ -778,6 +778,31 @@ class FunctionalTests(testtools.TestCase):
         }
         self.check_example("nosec.py", expect)
 
+    def test_nosec_nested_multiline_calls(self):
+        """A nosec on an inner call must not suppress the outer call.
+
+        The blanket ``# nosec`` inside the first nested call suppresses the
+        inner B607/B603 findings only; the enclosing shell=True findings and
+        the adjacent statement are still reported.
+        """
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 4, "MEDIUM": 0, "HIGH": 2},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 6},
+        }
+        self.check_example("nosec_nested_calls.py", expect)
+        expect_stats = {"nosec": 2, "skipped_tests": 1}
+        self.check_metrics("nosec_nested_calls.py", expect_stats)
+
+    def test_nosec_nested_multiline_calls_ignore_nosec(self):
+        """With --ignore-nosec every nested finding is reported again."""
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 7, "MEDIUM": 0, "HIGH": 2},
+            "CONFIDENCE": {"UNDEFINED": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 9},
+        }
+        self.check_example(
+            "nosec_nested_calls.py", expect, ignore_nosec=True
+        )
+
     def test_baseline_filter(self):
         issue_text = (
             "A Flask app appears to be run with debug=True, which "

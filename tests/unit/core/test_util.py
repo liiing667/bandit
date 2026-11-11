@@ -340,3 +340,141 @@ class UtilTests(testtools.TestCase):
 
     def test_check_ast_node_bad_type(self):
         self.assertRaises(TypeError, b_utils.check_ast_node, "walk")
+
+
+class NosecNodeTests(testtools.TestCase):
+    """Tests for AST node bound ``# nosec`` comments."""
+
+    NESTED_CALLS = """
+outer(
+    inner(
+        "arg",
+        shell=False,  # nosec
+    ),
+    shell=True,
+)
+adjacent()
+"""
+
+    def _parse(self, source):
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                child._bandit_parent = node
+        return tree
+
+    def _calls(self, tree):
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        ]
+        return calls
+
+    def _call_by_name(self, tree, func_name):
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == func_name
+            ):
+                return node
+        self.fail(f"call {func_name} not found")
+
+    def test_nosec_binds_to_inner_node_only(self):
+        tree = self._parse(self.NESTED_CALLS)
+        inner = self._call_by_name(tree, "inner")
+        outer = self._call_by_name(tree, "outer")
+        adjacent = self._call_by_name(tree, "adjacent")
+        nosec_nodes = b_utils.build_nosec_ast_map(tree, {5: set()})
+
+        self.assertIn(inner, nosec_nodes)
+        self.assertNotIn(outer, nosec_nodes)
+        self.assertNotIn(adjacent, nosec_nodes)
+
+    def test_nosec_does_not_suppress_enclosing_call(self):
+        tree = self._parse(self.NESTED_CALLS)
+        inner = self._call_by_name(tree, "inner")
+        outer = self._call_by_name(tree, "outer")
+        adjacent = self._call_by_name(tree, "adjacent")
+        nosec_nodes = b_utils.build_nosec_ast_map(tree, {5: set()})
+
+        inner_context = {"node": inner, "lineno": inner.lineno}
+        outer_context = {"node": outer, "lineno": outer.lineno}
+        adjacent_context = {"node": adjacent, "lineno": adjacent.lineno}
+
+        self.assertEqual(
+            set(),
+            b_utils.get_nosec_for_node(
+                nosec_nodes, {}, inner_context
+            ),
+        )
+        self.assertIsNone(
+            b_utils.get_nosec_for_node(
+                nosec_nodes, {}, outer_context
+            )
+        )
+        self.assertIsNone(
+            b_utils.get_nosec_for_node(
+                nosec_nodes, {}, adjacent_context
+            )
+        )
+
+    def test_precise_ids_merged_for_same_node(self):
+        source = (
+            "outer(  # nosec B602\n"
+            "    value,\n"
+            ")  # nosec B607\n"
+        )
+        tree = self._parse(source)
+        call = self._calls(tree)[0]
+        nosec_nodes = b_utils.build_nosec_ast_map(
+            tree, {1: {"B602"}, 3: {"B607"}}
+        )
+
+        self.assertEqual({"B602", "B607"}, nosec_nodes[call])
+
+    def test_comments_without_nosec_are_ignored(self):
+        tree = self._parse("outer(value)  # plain comment\n")
+        nosec_nodes = b_utils.build_nosec_ast_map(tree, {1: None})
+        self.assertEqual({}, nosec_nodes)
+
+    def test_same_line_nosec_still_matches(self):
+        source = "outer(value)  # nosec\n"
+        tree = self._parse(source)
+        call = self._calls(tree)[0]
+        nosec_lines = {1: set()}
+        nosec_nodes = b_utils.build_nosec_ast_map(tree, nosec_lines)
+        context = {"node": call, "lineno": call.lineno}
+
+        self.assertEqual(
+            set(),
+            b_utils.get_nosec_for_node(
+                nosec_nodes, nosec_lines, context
+            ),
+        )
+
+    def test_exact_line_fallback_for_multiline_strings(self):
+        # The comment sits on a continuation line that does not coincide
+        # with the node boundary where the check is triggered.
+        source = (
+            'query = ("SELECT * "\n'
+            '         "FROM foo "  # nosec\n'
+            '         f"WHERE id = {x}")\n'
+        )
+        tree = self._parse(source)
+        constant = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+        nosec_lines = {2: set()}
+        nosec_nodes = b_utils.build_nosec_ast_map(tree, nosec_lines)
+        context = {"node": constant, "lineno": constant.lineno}
+
+        self.assertEqual(
+            set(),
+            b_utils.get_nosec_for_node(
+                nosec_nodes, nosec_lines, context
+            ),
+        )

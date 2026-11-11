@@ -15,10 +15,21 @@ LOG = logging.getLogger(__name__)
 
 class BanditNodeVisitor:
     def __init__(
-        self, fname, fdata, metaast, testset, debug, nosec_lines, metrics
+        self,
+        fname,
+        fdata,
+        metaast,
+        testset,
+        debug,
+        nosec_lines,
+        nosec_nodes,
+        file_ast,
+        metrics,
     ):
         self.debug = debug
         self.nosec_lines = nosec_lines
+        self.nosec_nodes = nosec_nodes
+        self.file_ast = file_ast
         self.scores = {
             "SEVERITY": [0] * len(constants.RANKING),
             "CONFIDENCE": [0] * len(constants.RANKING),
@@ -31,7 +42,11 @@ class BanditNodeVisitor:
         self.imports = set()
         self.import_aliases = {}
         self.tester = b_tester.BanditTester(
-            self.testset, self.debug, nosec_lines, metrics
+            self.testset,
+            self.debug,
+            nosec_lines,
+            nosec_nodes,
+            metrics,
         )
 
         # in some cases we can't determine a qualified name
@@ -282,8 +297,7 @@ class BanditNodeVisitor:
         :param lines: lines code to process
         :return score: the aggregated score for the current file
         """
-        f_ast = ast.parse(data)
-        self.generic_visit(f_ast)
+        self.generic_visit(self.file_ast)
         # Run tests that do not require access to the AST,
         # but only to the whole file source:
         self.context = {

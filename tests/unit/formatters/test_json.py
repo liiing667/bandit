@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import collections
 import json
+import os
 import tempfile
 from unittest import mock
 
@@ -113,3 +114,50 @@ class JsonFormatterTests(testtools.TestCase):
             self.assertIn("candidates", data["results"][0])
             self.assertIn("more_info", data["results"][0])
             self.assertIsNotNone(data["results"][0]["more_info"])
+
+    def test_nosec_metrics_only_count_real_suppressions(self):
+        source = """
+from subprocess import Popen
+
+Popen(
+    Popen(
+        "ls -l",
+        shell=False,  # nosec
+    ),
+    shell=True,
+)
+Popen("ls -l", shell=True)
+"""
+        temp_dir = tempfile.mkdtemp()
+        code_file = os.path.join(temp_dir, "nested_nosec.py")
+        with open(code_file, "w") as fd:
+            fd.write(source)
+
+        mgr = manager.BanditManager(config.BanditConfig(), "file")
+        mgr.discover_files([code_file], True)
+        mgr.run_tests()
+
+        with open(self.tmp_fname, "w") as tmp_file:
+            b_json.report(
+                mgr,
+                tmp_file,
+                constants.LOW,
+                constants.LOW,
+            )
+
+        with open(self.tmp_fname) as f:
+            data = json.loads(f.read())
+
+        totals = data["metrics"]["_totals"]
+        # The single inner nosec really suppresses two inner findings; the
+        # outer and adjacent findings remain in the report and must not be
+        # counted as skipped.
+        self.assertEqual(2, totals["nosec"])
+        self.assertEqual(0, totals["skipped_tests"])
+        reported = {
+            (result["line_number"], result["test_id"])
+            for result in data["results"]
+        }
+        self.assertIn((9, "B602"), reported)
+        self.assertIn((11, "B602"), reported)
+        self.assertNotIn((7, "B603"), reported)

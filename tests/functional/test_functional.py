@@ -778,6 +778,58 @@ class FunctionalTests(testtools.TestCase):
         }
         self.check_example("nosec.py", expect)
 
+    def test_nosec_multiline(self):
+        """Nosec comments are bound to the AST node they annotate.
+
+        A comment inside a multi-line expression only suppresses the
+        finding of the node (or an ancestor) it is bound to; findings of
+        overlapping sibling calls are unaffected.
+        """
+        # Severity: one HIGH B602 (nested outer call), ten LOW findings
+        # (B404 import, B603/B602/B607 across the surviving calls). The
+        # suppressed findings of annotated nodes never reach the results.
+        expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 10, "MEDIUM": 0, "HIGH": 1},
+            "CONFIDENCE": {
+                "UNDEFINED": 0,
+                "LOW": 0,
+                "MEDIUM": 0,
+                "HIGH": 11,
+            },
+        }
+        self.check_example("nosec_multiline.py", expect)
+
+        # Blanket nosecs each count once per finding they suppress (the
+        # blanket sibling call and the unknown-id call); the remaining
+        # comments use specific test id skips.
+        expect_stats = {
+            "nosec": 4,
+            "skipped_tests": 5,
+        }
+        self.check_metrics("nosec_multiline.py", expect_stats)
+
+        # --ignore-nosec restores every finding.
+        ignore_expect = {
+            "SEVERITY": {"UNDEFINED": 0, "LOW": 19, "MEDIUM": 0, "HIGH": 1},
+            "CONFIDENCE": {
+                "UNDEFINED": 0,
+                "LOW": 0,
+                "MEDIUM": 0,
+                "HIGH": 20,
+            },
+        }
+        self.check_example(
+            "nosec_multiline.py", ignore_expect, ignore_nosec=True
+        )
+
+        # Unknown test ids keep warning instead of silently suppressing.
+        with self.assertLogs("bandit.core.manager", level="WARNING") as logs:
+            self.run_example("nosec_multiline.py")
+        self.assertTrue(
+            any("B999" in message for message in logs.output),
+            "unknown nosec test id should still produce a warning",
+        )
+
     def test_baseline_filter(self):
         issue_text = (
             "A Flask app appears to be run with debug=True, which "

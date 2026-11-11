@@ -125,31 +125,28 @@ class BanditTester:
         return scores
 
     def _get_nosecs_from_contexts(self, context, test_result=None):
-        """Use context and optional test result to get set of tests to skip.
+        """Get the set of tests suppressed for the context's AST node.
+
+        Nosec comments are bound to the AST node they annotate, so a
+        finding is only suppressed by a comment on the producing node or
+        one of its ancestors. Comments inside overlapping sibling nodes
+        are ignored.
+
         :param context: temp context
-        :param test_result: optional test result
-        :return: set of tests to skip for the line based on contexts
+        :param test_result: optional test result (kept for compatibility)
+        :return: ``None`` when no nosec applies, otherwise a set of test
+                 ids; an empty set means a blanket ``# nosec`` comment
         """
-        nosec_tests_to_skip = set()
-        base_tests = (
-            self.nosec_lines.get(test_result.lineno, None)
-            if test_result
-            else None
+        node = context.get("node")
+        nosec_tests_to_skip = utils.get_nosec_for_node(
+            node, self.nosec_lines
         )
-        context_tests = utils.get_nosec(self.nosec_lines, context)
 
-        # if both are none there were no comments
-        # this is explicitly different from being empty.
-        # empty set indicates blanket nosec comment without
-        # individual test names or ids
-        if base_tests is None and context_tests is None:
-            nosec_tests_to_skip = None
-
-        # combine tests from current line and context line
-        if base_tests is not None:
-            nosec_tests_to_skip.update(base_tests)
-        if context_tests is not None:
-            nosec_tests_to_skip.update(context_tests)
+        # Contexts without an AST node (for example whole-file checks)
+        # fall back to the historical line based lookup.
+        if nosec_tests_to_skip is None and node is None:
+            lineno = context.get("lineno")
+            nosec_tests_to_skip = self.nosec_lines.get(lineno, None)
 
         return nosec_tests_to_skip
 

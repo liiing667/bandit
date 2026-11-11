@@ -283,6 +283,10 @@ class BanditNodeVisitor:
         :return score: the aggregated score for the current file
         """
         f_ast = ast.parse(data)
+        # Bind nosec comments to the AST nodes they actually annotate
+        # before visiting the tree, so suppression follows the node
+        # hierarchy instead of raw line ranges.
+        b_utils.bind_nosec_comments(f_ast, self.nosec_lines)
         self.generic_visit(f_ast)
         # Run tests that do not require access to the AST,
         # but only to the whole file source:

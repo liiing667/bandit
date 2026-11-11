@@ -396,3 +396,156 @@ def get_nosec(nosec_lines, context):
         if nosec is not None:
             return nosec
     return None
+
+
+def bind_nosec_comments(tree, nosec_lines):
+    """Bind nosec comments to the AST nodes they actually annotate.
+
+    A trailing comment on a line where a statement level node starts is
+    bound to the outermost such node. A comment on a keyword argument
+    line inside a multi-line call is bound to the enclosing call, and a
+    comment inside a multi-line expression is bound to the deepest node
+    fully containing its line. The resulting mapping is stored on the
+    nodes via ``_bandit_nosec`` so that only the node producing a finding
+    or one of its ancestors can suppress it; overlapping sibling nodes
+    never affect each other.
+
+    :param tree: Root AST node of the file
+    :param nosec_lines: Mapping of source line -> set of test ids
+                        (an empty set means a blanket ``# nosec``)
+    :return: The same mapping, attached to the relevant AST nodes
+    """
+    nodes = [
+        node
+        for node in ast.walk(tree)
+        if hasattr(node, "lineno") and hasattr(node, "end_lineno")
+    ]
+
+    # The visitor only attaches ``_bandit_parent`` while walking the tree,
+    # so build a local parent map here to keep binding independent of the
+    # traversal order.
+    parent_map = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent_map[id(child)] = node
+
+    def depth(node):
+        result = 0
+        parent = parent_map.get(id(node))
+        while parent is not None:
+            result += 1
+            parent = parent_map.get(id(parent))
+        return result
+
+    def enclosing_call(node):
+        parent = parent_map.get(id(node))
+        while parent is not None and not isinstance(parent, ast.Call):
+            parent = parent_map.get(id(parent))
+        return parent
+
+    for lineno, nosec_tests in nosec_lines.items():
+        if nosec_tests is None:
+            # The manager records every comment line, using None for
+            # comments without a nosec marker; only bind real nosecs.
+            continue
+        candidates = [
+            node
+            for node in nodes
+            if node.lineno <= lineno <= node.end_lineno
+        ]
+        if not candidates:
+            continue
+
+        # A trailing comment on a line where a statement level node
+        # starts annotates the outermost such node (an import, a single
+        # line call, the outer call of a nested expression). A keyword
+        # line inside a multi-line call annotates its enclosing call.
+        # Anything else binds to the deepest node fully containing the
+        # line (for example a standalone comment inside a multi-line
+        # expression).
+        statement_types = (
+            ast.stmt,
+            ast.Call,
+            ast.BinOp,
+            ast.BoolOp,
+            ast.Compare,
+            ast.IfExp,
+            ast.JoinedStr,
+        )
+        line_start_statements = [
+            node
+            for node in candidates
+            if node.lineno == lineno and isinstance(node, statement_types)
+        ]
+        if line_start_statements:
+            # Prefer an actual statement node (Expr, Assign, ...) over a
+            # nested expression or call starting on the same line.
+            stmt_only = [
+                node
+                for node in line_start_statements
+                if isinstance(node, ast.stmt)
+            ]
+            target = min(stmt_only or line_start_statements, key=depth)
+        else:
+            # Inside a multi-line node: a keyword line annotates its
+            # enclosing call; otherwise bind to the deepest enclosing
+            # node (or the outermost expression ending on this line).
+            keyword_candidates = [
+                node for node in candidates if isinstance(node, ast.keyword)
+            ]
+            if keyword_candidates:
+                target = max(keyword_candidates, key=depth)
+                call_node = enclosing_call(target)
+                if call_node is not None:
+                    target = call_node
+            else:
+                line_end_nodes = [
+                    node
+                    for node in candidates
+                    if node.end_lineno == lineno
+                    and isinstance(node, statement_types)
+                ]
+                if line_end_nodes:
+                    target = min(line_end_nodes, key=depth)
+                else:
+                    target = max(candidates, key=depth)
+
+        existing = getattr(target, "_bandit_nosec", None)
+        if existing is None:
+            target._bandit_nosec = set(nosec_tests)
+        else:
+            existing.update(nosec_tests)
+
+    return nosec_lines
+
+
+def get_nosec_for_node(node, nosec_lines):
+    """Collect nosec comments applying to a finding's AST node.
+
+    Only comments bound to the node itself or to one of its ancestors are
+    considered, so a comment inside an overlapping sibling subtree cannot
+    suppress a finding produced by this node.
+
+    :param node: The AST node that produced the finding
+    :param nosec_lines: Mapping built while tokenizing the file (kept for
+                        callers relying on the historical signature)
+    :return: ``None`` when no comment applies, otherwise a set of test ids
+             (an empty set means a blanket ``# nosec``)
+    """
+    if node is None:
+        return None
+
+    nosec_tests_to_skip = set()
+    found = False
+    current = node
+    while current is not None:
+        node_nosec = getattr(current, "_bandit_nosec", None)
+        if node_nosec is not None:
+            found = True
+            nosec_tests_to_skip.update(node_nosec)
+        current = getattr(current, "_bandit_parent", None)
+
+    if found:
+        return nosec_tests_to_skip
+
+    return None

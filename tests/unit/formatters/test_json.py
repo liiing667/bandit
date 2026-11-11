@@ -4,6 +4,7 @@
 import collections
 import json
 import tempfile
+import textwrap
 from unittest import mock
 
 import testtools
@@ -113,3 +114,95 @@ class JsonFormatterTests(testtools.TestCase):
             self.assertIn("candidates", data["results"][0])
             self.assertIn("more_info", data["results"][0])
             self.assertIsNotNone(data["results"][0]["more_info"])
+
+    def test_report_preserves_fields_with_nosec_suppression(self):
+        """Nosec suppression keeps the JSON schema unchanged."""
+        conf = config.BanditConfig()
+        b_mgr = manager.BanditManager(conf, "file")
+        (tmp_fd, tmp_fname) = tempfile.mkstemp()
+
+        suppressed_source = textwrap.dedent(
+            """\
+            import subprocess
+            run(
+                subprocess.Popen("relative/path", shell=True),
+                subprocess.Popen("relative/path", shell=True),
+            )  # nosec B602
+            """
+        )
+        reported_source = textwrap.dedent(
+            """\
+            import subprocess
+            run(
+                subprocess.Popen("relative/path", shell=True),  # nosec B602
+                subprocess.Popen("relative/path", shell=True),
+            )
+            """
+        )
+        with open(tmp_fname, "w") as tmp_file:
+            tmp_file.write(suppressed_source)
+
+        b_mgr.discover_files([tmp_fname], True)
+        b_mgr.run_tests()
+        # The nosec is bound to the outer run() call, an ancestor of both
+        # Popen calls, so both B602 findings are suppressed. B607 findings
+        # (which are not listed in the nosec) and the B404 import finding
+        # are unaffected.
+        suppressed_ids = {issue.test_id for issue in b_mgr.results}
+        self.assertNotIn("B602", suppressed_ids)
+        self.assertIn("B607", suppressed_ids)
+        self.assertIn("B404", suppressed_ids)
+
+        with open(tmp_fname, "w") as tmp_file:
+            tmp_file.write(reported_source)
+        reported_manager = manager.BanditManager(conf, "file")
+        reported_manager.discover_files([tmp_fname], True)
+        reported_manager.run_tests()
+        # The comment is bound to the first sibling call only; the second
+        # sibling's B602 finding must still be reported.
+        reported = {
+            issue.test_id: issue.lineno
+            for issue in reported_manager.results
+        }
+        self.assertEqual(reported["B602"], 4)
+        self.assertNotIn(3, reported.values())
+
+        with open(tmp_fname, "w") as tmp_file:
+            b_json.report(
+                reported_manager,
+                tmp_file,
+                constants.LOW,
+                constants.LOW,
+            )
+
+        with open(tmp_fname) as tmp_file:
+            data = json.loads(tmp_file.read())
+
+        expected_keys = {
+            "code",
+            "col_offset",
+            "end_col_offset",
+            "filename",
+            "issue_confidence",
+            "issue_cwe",
+            "issue_severity",
+            "issue_text",
+            "line_number",
+            "line_range",
+            "more_info",
+            "test_id",
+            "test_name",
+        }
+        self.assertIn("errors", data)
+        self.assertIn("generated_at", data)
+        # Only the second sibling's B602 survives; B404/B607 findings are
+        # unrelated to the nosec and remain in the report.
+        b602_results = [
+            result
+            for result in data["results"]
+            if result["test_id"] == "B602"
+        ]
+        self.assertEqual(1, len(b602_results))
+        self.assertEqual(4, b602_results[0]["line_number"])
+        for result in data["results"]:
+            self.assertEqual(expected_keys, set(result.keys()))

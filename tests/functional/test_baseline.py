@@ -1,6 +1,7 @@
 # Copyright 2016 IBM Corp.
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
 import shutil
 import subprocess
@@ -339,3 +340,45 @@ class BaselineFunctionalTests(testtools.TestCase):
         self.assertIn(candidate_example_five, return_value)
         # candidate #6
         self.assertIn(candidate_example_six, return_value)
+
+    def test_multiline_nosec_suppression(self):
+        """Multi-line nosec comments stay scoped to their AST node.
+
+        A comment on a sibling argument line must not suppress findings of
+        the other sibling, while a comment on an enclosing call suppresses
+        its whole subtree. Baseline filtering must keep working with the
+        node based suppression.
+        """
+        baseline_report_files = {
+            "nosec_multiline.py": "nosec_multiline.py"
+        }
+        target_directory, baseline_code = self._create_baseline(
+            baseline_report_files
+        )
+        # The initial run reports the findings not suppressed by nosec.
+        self.assertEqual(1, baseline_code)
+        baseline_report = os.path.join(
+            target_directory, self.baseline_report_file
+        )
+        return_value, return_code = self._run_bandit_baseline(
+            target_directory, baseline_report
+        )
+        # No new findings compared with the baseline, so nothing is flagged.
+        self.assertEqual(0, return_code)
+        self.assertIn(baseline_no_skipped_files, return_value)
+        self.assertIn(baseline_no_issues_found, return_value)
+        # The sibling findings survive the comments and therefore appear
+        # in the baseline report itself.
+        with open(baseline_report) as baseline_file:
+            baseline_data = json.loads(baseline_file.read())
+        test_ids = [
+            result["test_id"] for result in baseline_data["results"]
+        ]
+        # The surviving findings are exactly those not bound to an
+        # annotated node: sibling/outer findings remain reported while
+        # findings of the commented nodes are suppressed.
+        self.assertEqual(11, len(test_ids))
+        self.assertEqual(3, test_ids.count("B602"))
+        self.assertEqual(5, test_ids.count("B607"))
+        self.assertEqual(2, test_ids.count("B603"))
+        self.assertEqual(1, test_ids.count("B404"))
